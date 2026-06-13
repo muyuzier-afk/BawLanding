@@ -10,15 +10,42 @@ type PingOptions = {
   timeoutMs?: number; // 单次请求超时
   rounds?: number;    // 每个目标测几次，取最小值
   intervalMs?: number; // 多次之间的间隔
+  signal?: AbortSignal; // 外部中止信号（用户点"中止测速"时触发）
 };
 
 const DEFAULT_TIMEOUT = 2000;
 const DEFAULT_ROUNDS = 2;
 const DEFAULT_INTERVAL = 200;
 
-async function pingOnce(url: string, timeoutMs: number): Promise<number> {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+function combineSignals(signals: AbortSignal[]): AbortSignal {
+  // 优先用 AbortSignal.any（现代浏览器内置）
+  if (typeof AbortSignal !== 'undefined' && typeof (AbortSignal as { any?: unknown }).any === 'function') {
+    return (AbortSignal as unknown as { any: (s: AbortSignal[]) => AbortSignal }).any(signals);
+  }
+  // 兜底：手动链
+  const ctrl = new AbortController();
+  const onAbort = (s: AbortSignal) => () => ctrl.abort(s.reason);
+  for (const s of signals) {
+    if (s.aborted) {
+      ctrl.abort(s.reason);
+      break;
+    }
+    s.addEventListener('abort', onAbort(s), { once: true });
+  }
+  return ctrl.signal;
+}
+
+async function pingOnce(
+  url: string,
+  timeoutMs: number,
+  externalSignal?: AbortSignal
+): Promise<number> {
+  const timeoutController = new AbortController();
+  const timer = window.setTimeout(() => timeoutController.abort(), timeoutMs);
+  const signal = externalSignal
+    ? combineSignals([timeoutController.signal, externalSignal])
+    : timeoutController.signal;
+
   const started = performance.now();
   try {
     // 拼上随机 query 防止命中任何缓存
@@ -28,7 +55,7 @@ async function pingOnce(url: string, timeoutMs: number): Promise<number> {
       method: 'GET',
       mode: 'no-cors',
       cache: 'no-store',
-      signal: controller.signal,
+      signal,
       // keepalive 让页面在跳转前的最后一刻仍能完成
       keepalive: true,
     });
@@ -39,26 +66,47 @@ async function pingOnce(url: string, timeoutMs: number): Promise<number> {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const timer = window.setTimeout(resolve, ms);
+    if (signal) {
+      const onAbort = () => {
+        window.clearTimeout(timer);
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  });
 }
 
 export async function pingUrl(url: string, options: PingOptions = {}): Promise<PingResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT;
   const rounds = options.rounds ?? DEFAULT_ROUNDS;
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL;
+  const signal = options.signal;
   const samples: number[] = [];
   let lastError: string | undefined;
 
   for (let i = 0; i < rounds; i++) {
-    if (i > 0) await sleep(intervalMs);
+    if (i > 0) await sleep(intervalMs, signal);
     try {
-      const ms = await pingOnce(url, timeoutMs);
+      const ms = await pingOnce(url, timeoutMs, signal);
       samples.push(ms);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : '请求失败';
-      // abort 走 Error 名 'AbortError'，归一为超时
-      lastError = err instanceof DOMException && err.name === 'AbortError' ? `超时 (>${timeoutMs}ms)` : msg;
+      // 外部中止优先识别
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        if (signal?.aborted) {
+          lastError = '已中止';
+        } else {
+          lastError = `超时 (>${timeoutMs}ms)`;
+        }
+      } else {
+        lastError = err instanceof Error ? err.message : '请求失败';
+      }
     }
   }
 

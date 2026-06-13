@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { TargetCard } from '@/components/TargetCard';
 import { CountdownBar } from '@/components/CountdownBar';
 import { ManualLinks } from '@/components/ManualLinks';
+import { WhyDialog } from '@/components/WhyDialog';
 import { buildTargetUrl, pickFastest, pingAll, type PingResult } from '@/lib/ping';
 
 // 两个 BawMusic 入口节点
@@ -18,26 +19,67 @@ export default function BawRouterPage() {
   );
   const [fastest, setFastest] = useState<PingResult | null>(null);
   const [remaining, setRemaining] = useState<number>(REDIRECT_DELAY_MS);
+  const [measuring, setMeasuring] = useState(true);
+  const [aborted, setAborted] = useState(false);
   const [allFailed, setAllFailed] = useState(false);
+  const [whyOpen, setWhyOpen] = useState(false);
+
   const cancelledRef = useRef(false);
   const redirectedRef = useRef(false);
+  const measureControllerRef = useRef<AbortController | null>(null);
 
   // 跑测速
   const measure = useCallback(async () => {
+    // 取消上一次未完成的测速
+    measureControllerRef.current?.abort();
+    const controller = new AbortController();
+    measureControllerRef.current = controller;
+
     cancelledRef.current = false;
     redirectedRef.current = false;
     setFastest(null);
     setAllFailed(false);
+    setAborted(false);
+    setMeasuring(true);
     setResults(CANDIDATES.map(() => null));
     setRemaining(REDIRECT_DELAY_MS);
 
-    const res = await pingAll([...CANDIDATES], {
-      timeoutMs: 2000,
-      rounds: 2,
-      intervalMs: 200,
-    });
+    let res: PingResult[];
+    try {
+      res = await pingAll([...CANDIDATES], {
+        timeoutMs: 2000,
+        rounds: 2,
+        intervalMs: 200,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      // 整体被中止（基本不会走到这里，单条 catch 已被 lib 内部处理）
+      const msg = err instanceof Error ? err.message : '测速失败';
+      setResults(
+        CANDIDATES.map((u) => ({ url: u, ok: false, latencyMs: null, error: msg, samples: [] }))
+      );
+      setAborted(true);
+      setMeasuring(false);
+      return;
+    }
+
+    // 如果用户在 await 期间触发了 abort，用 controller 状态判断（避免 stale 写入）
+    if (controller.signal.aborted) {
+      return;
+    }
     if (cancelledRef.current) return;
+
     setResults(res);
+    setMeasuring(false);
+
+    // 全部 aborted / failed
+    if (res.every((r) => !r.ok)) {
+      setAllFailed(true);
+      if (res.some((r) => r.error === '已中止')) {
+        setAborted(true);
+      }
+      return;
+    }
 
     const best = pickFastest(res);
     if (!best) {
@@ -59,6 +101,9 @@ export default function BawRouterPage() {
 
   useEffect(() => {
     void measure();
+    return () => {
+      measureControllerRef.current?.abort();
+    };
   }, [measure]);
 
   // 倒计时
@@ -92,6 +137,10 @@ export default function BawRouterPage() {
     void measure();
   }, [measure]);
 
+  const handleAbort = useCallback(() => {
+    measureControllerRef.current?.abort();
+  }, []);
+
   return (
     <main className="app">
       <header className="brand">
@@ -113,9 +162,13 @@ export default function BawRouterPage() {
 
       {allFailed ? (
         <div className="error-state" role="alert">
-          <div className="error-state-title">两个节点都不可达</div>
+          <div className="error-state-title">
+            {aborted ? '测速已中止' : '两个节点都不可达'}
+          </div>
           <div className="error-state-desc">
-            网络可能受限，或两个 BawMusic 入口都暂时无响应。请检查网络后重试，或手动选择入口。
+            {aborted
+              ? '你可以点下方「重新测速」再试一次，或直接手动选择入口。'
+              : '网络可能受限，或两个 BawMusic 入口都暂时无响应。请检查网络后重试，或手动选择入口。'}
           </div>
         </div>
       ) : (
@@ -123,8 +176,10 @@ export default function BawRouterPage() {
           remainingMs={remaining}
           totalMs={REDIRECT_DELAY_MS}
           fastestHost={fastest ? new URL(fastest.url).host : null}
+          measuring={measuring}
           onCancel={handleCancel}
           onRemeasure={handleRemeasure}
+          onAbort={handleAbort}
         />
       )}
 
@@ -133,6 +188,18 @@ export default function BawRouterPage() {
         disabled={false}
         highlightUrl={fastest?.url}
       />
+
+      <footer className="app-footer">
+        <button
+          type="button"
+          className="why-link"
+          onClick={() => setWhyOpen(true)}
+        >
+          为什么看到这个页面？
+        </button>
+      </footer>
+
+      <WhyDialog open={whyOpen} onClose={() => setWhyOpen(false)} />
     </main>
   );
 }
