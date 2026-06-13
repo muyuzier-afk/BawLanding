@@ -28,7 +28,7 @@ export function WhyDialog({ open, onClose }: Props) {
       aria-labelledby="why-title"
       onClick={onClose}
     >
-      <section className="why-card glass" onClick={(e) => e.stopPropagation()}>
+      <section className="why-card" onClick={(e) => e.stopPropagation()}>
         <button className="why-close" onClick={onClose} type="button" aria-label="关闭">
           ×
         </button>
@@ -50,10 +50,10 @@ export function WhyDialog({ open, onClose }: Props) {
           <h3>两个节点的差异</h3>
           <ul>
             <li>
-              <code>bawmusic.top</code> — 主源，标准部署
+              <code>bawmusic.top</code> — 原版，部署在阿里云 ESA CDN
             </li>
             <li>
-              <code>eo.bawmusic.top</code> — 边缘优化版（阿里云 ESA），通常延迟更低
+              <code>eo.bawmusic.top</code> — 部署在腾讯云 EdgeOne CDN（eo = EdgeOne）
             </li>
           </ul>
         </div>
